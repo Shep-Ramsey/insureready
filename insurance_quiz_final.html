@@ -208,6 +208,14 @@ nav{position:fixed;top:0;left:0;right:0;z-index:100;display:flex;align-items:cen
       <div class="mode-card-sub">Extended session</div>
     </div>
   </div>
+  <div style="margin-top:1.5rem;max-width:520px;width:100%">
+    <div style="background:var(--surface);border:1px solid var(--border2);border-radius:var(--radius-sm);padding:12px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+      <div id="history-display" style="font-size:12px;color:var(--muted)">Loading history...</div>
+      <button onclick="clearHistory()" style="background:transparent;border:1px solid var(--border2);color:var(--muted);font-size:12px;padding:4px 12px;border-radius:6px;cursor:pointer;font-family:var(--font-body);white-space:nowrap">Reset history</button>
+    </div>
+    <div style="font-size:11px;color:var(--muted2);margin-top:6px;text-align:center">Questions you have seen recently will be shown last — keeping your sessions fresh</div>
+  </div>
+  <div style="height:1rem"></div>
   <button class="btn-start" onclick="startQuiz()">Start exam &#8594;</button>
 </div>
 
@@ -283,6 +291,85 @@ const LABELS=['A','B','C','D'];
 let queue=[],current=0,results=[],answered=false,selectedMode='25',lastMode='25';
 let showExp=false;
 
+// ── STORAGE HELPERS ──────────────────────────────────────────────
+const STORAGE_KEY='insureready_seen';
+const STORAGE_STATS='insureready_stats';
+const MAX_RECENT=300; // don't repeat any of the last 300 seen questions
+
+function loadSeen(){
+  try{ return JSON.parse(localStorage.getItem(STORAGE_KEY)||'[]'); }
+  catch(e){ return []; }
+}
+function saveSeen(arr){
+  try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(arr.slice(-MAX_RECENT))); }
+  catch(e){}
+}
+function loadStats(){
+  try{ return JSON.parse(localStorage.getItem(STORAGE_STATS)||'{"sessions":0,"correct":0,"wrong":0,"skipped":0}'); }
+  catch(e){ return {sessions:0,correct:0,wrong:0,skipped:0}; }
+}
+function saveStats(s){
+  try{ localStorage.setItem(STORAGE_STATS, JSON.stringify(s)); }
+  catch(e){}
+}
+function clearHistory(){
+  try{ localStorage.removeItem(STORAGE_KEY); localStorage.removeItem(STORAGE_STATS); }
+  catch(e){}
+  updateHistoryDisplay();
+  alert('History cleared! All questions are back in the pool.');
+}
+function updateHistoryDisplay(){
+  const seen=loadSeen();
+  const stats=loadStats();
+  const el=document.getElementById('history-display');
+  if(el){
+    el.textContent=seen.length+' of '+QUESTIONS.length+' questions seen recently  •  '+
+      stats.sessions+' sessions  •  '+stats.correct+' correct  •  '+stats.wrong+' wrong';
+  }
+}
+
+// ── CRYPTO SHUFFLE ───────────────────────────────────────────────
+function cryptoRandom(){
+  const arr=new Uint32Array(1);
+  crypto.getRandomValues(arr);
+  return arr[0]/0xFFFFFFFF;
+}
+function shuffle(arr){
+  let a=[...arr];
+  for(let i=a.length-1;i>0;i--){
+    let j=Math.floor(cryptoRandom()*(i+1));
+    [a[i],a[j]]=[a[j],a[i]];
+  }
+  return a;
+}
+
+// ── SMART QUEUE BUILDER ──────────────────────────────────────────
+function buildSmartQueue(n){
+  const seen=loadSeen();
+  const seenSet=new Set(seen);
+  const all=QUESTIONS.map((item,i)=>({...item,_orig:i}));
+
+  // Partition into unseen and seen
+  let unseen=all.filter(q=>!seenSet.has(q._orig));
+  let seenQ=all.filter(q=>seenSet.has(q._orig));
+
+  // Shuffle both pools with crypto shuffle
+  unseen=shuffle(unseen);
+  seenQ=shuffle(seenQ);
+
+  let picked=[];
+  if(unseen.length>=n){
+    // Plenty of unseen — use all unseen
+    picked=unseen.slice(0,n);
+  } else {
+    // Use all unseen + fill remainder from seen pool
+    picked=[...unseen, ...seenQ.slice(0, n-unseen.length)];
+  }
+
+  // Final crypto shuffle of the picked set
+  return shuffle(picked);
+}
+
 function selectMode(el){
   document.querySelectorAll('.mode-card').forEach(b=>b.classList.remove('active'));
   el.classList.add('active'); selectedMode=el.dataset.mode;
@@ -307,15 +394,15 @@ function updateExplanationBox(){
   }
 }
 
-function shuffle(arr){let a=[...arr];for(let i=a.length-1;i>0;i--){let j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
 function showScreen(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));document.getElementById(id).classList.add('active');window.scrollTo(0,0);}
 
 function startQuiz(customQueue){
-  let q=customQueue||QUESTIONS.map((item,i)=>({...item,_orig:i}));
-  if(!customQueue){
-    q=shuffle(q);
+  let q;
+  if(customQueue){
+    q=customQueue;
+  } else {
     const n=parseInt(selectedMode);
-    if(!isNaN(n)) q=q.slice(0,n);
+    q=isNaN(n)?shuffle(QUESTIONS.map((item,i)=>({...item,_orig:i}))):buildSmartQueue(n);
     lastMode=selectedMode;
   }
   queue=q; current=0;
@@ -421,9 +508,17 @@ function goPrev(){
 
 function showResults(){
   showScreen('results');
+  // Save seen questions to localStorage
+  const seen=loadSeen();
+  queue.forEach(q=>{ if(!seen.includes(q._orig)) seen.push(q._orig); });
+  saveSeen(seen);
+  // Save stats
   const correct=results.filter(r=>r.status==='correct').length;
   const wrong=results.filter(r=>r.status==='wrong').length;
   const skipped=results.filter(r=>r.status==='skipped'||r.status==='unanswered').length;
+  const stats=loadStats();
+  stats.sessions++; stats.correct+=correct; stats.wrong+=wrong; stats.skipped+=skipped;
+  saveStats(stats);
   const pct=Math.round((correct/queue.length)*100);
   let grade,tagline,gradeClass;
   if(pct>=90){grade='A';tagline="Outstanding — you're ready to pass.";gradeClass='grade-A';}
@@ -471,10 +566,13 @@ function retryWrong(){
 }
 
 function retryAll(){
-  const q=shuffle(QUESTIONS.map((item,i)=>({...item,_orig:i})));
   const n=parseInt(lastMode);
-  startQuiz(!isNaN(n)?q.slice(0,n):q);
+  startQuiz(isNaN(n)?shuffle(QUESTIONS.map((item,i)=>({...item,_orig:i}))):buildSmartQueue(n));
 }
+
+// Init history display on load
+document.addEventListener('DOMContentLoaded', updateHistoryDisplay);
+setTimeout(updateHistoryDisplay, 100);
 </script>
 </body>
 </html>
